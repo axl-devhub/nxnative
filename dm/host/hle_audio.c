@@ -781,9 +781,26 @@ static int mic_restart(const char *why) {
 static AudioQueueRef g_aq;       // changed only under g_mic_lock
 static _Atomic int g_aq_run;
 static dispatch_queue_t g_mic_q;
+// DM_MIC_GAIN=<factor> (the launcher's Microphone gain): the captured samples times the factor, saturated, before the streams' own gain. A hum into a laptop's microphone is quiet
+static void mic_scale(int16_t *pcm, int n, float gain) {   // tests call it directly
+    for (int i = 0; i < n; i++) { float v = (float)pcm[i] * gain; pcm[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v; }
+}
+static float mic_gain(void) {   // read once, on the capture's thread
+    static float g;
+    if (!g) {
+        const char *e = getenv("DM_MIC_GAIN"); float v = e && *e ? strtof(e, NULL) : 1;
+        g = v >= 0.25f && v <= 8 ? v : 1;
+        if (g != v) LOG("[RED] DM_MIC_GAIN=%s: a factor from 0.25 to 8; using 1", e);
+        else if (g != 1) LOG("microphone: gain %.2f (DM_MIC_GAIN)", g);
+    }
+    return g;
+}
+__attribute__((weak)) int dm_mic_access(void) { return 1; }   // 1 allowed, 0 not asked yet, -1 denied or restricted by macOS (TCC): front_mac.m's definition replaces this one, which the tests and iOS keep
 static void mic_aq_input(void *ud, AudioQueueRef q, AudioQueueBufferRef b, const AudioTimeStamp *t, UInt32 npk, const AudioStreamPacketDescription *d) {
     (void)ud; (void)t; (void)npk; (void)d;
     if (!atomic_load(&g_aq_run)) return;
+    float gain = mic_gain();
+    if (gain != 1) mic_scale(b->mAudioData, (int)(b->mAudioDataByteSize / 2), gain);
     is_feed(b->mAudioData, (int)(b->mAudioDataByteSize / 2));
     AudioQueueEnqueueBuffer(q, b, 0, NULL);
 }
@@ -946,6 +963,8 @@ static int mic_aq_start(void) {
         return -1;
     }
     LOG("microphone: capturing %s, 48 kHz mono", dev);
+    if (dm_mic_access() < 0)   // the queue runs all the same and gets silence, which looked like a game that does not listen
+        LOG("[RED] microphone: macOS denies this app the microphone, so the capture is silent: allow it in System Settings > Privacy & Security > Microphone, then start the game again");
     return 0;
 }
 static void mic_aq_stop(void) {
