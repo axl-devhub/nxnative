@@ -857,9 +857,33 @@ static AudioDeviceID mic_builtin_input(void) {   // the built-in microphone: a b
     }
     return found;
 }
+static AudioDeviceID mic_input_by_uid(const char *want) {   // the device with input streams whose UID is want, or kAudioObjectUnknown
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = 0; AudioDeviceID devs[64];
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size)) return kAudioObjectUnknown;
+    if (size > sizeof devs) size = sizeof devs;
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, devs)) return kAudioObjectUnknown;
+    AudioObjectPropertyAddress in = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput, kAudioObjectPropertyElementMain };
+    for (UInt32 i = 0; i < size / sizeof devs[0]; i++) {
+        UInt32 streams = 0; char u[256];
+        if (AudioObjectGetPropertyDataSize(devs[i], &in, 0, NULL, &streams) || !streams) continue;
+        CFStringRef uid = mic_string(devs[i], kAudioDevicePropertyDeviceUID); mic_cstr(uid, u, sizeof u, "");
+        if (uid) CFRelease(uid);
+        if (!strcmp(u, want)) return devs[i];
+    }
+    return kAudioObjectUnknown;
+}
+// DM_MIC_DEVICE=<UID> (the launcher's Microphone): the player's device is taken as it is, a Bluetooth headset too (the player chose its call-quality sound). A device that is not
+// connected now gives the automatic choice below, and the next device change looks for it again (mic_restart)
 // The device to capture: its name in dev, and in *uid the UID to set on the queue when it is not the default input (NULL: the default). Returns MIC_TAKE_*
 static int mic_choose(char *dev, size_t n, CFStringRef *uid) {
     *uid = NULL;
+    const char *want = getenv("DM_MIC_DEVICE");
+    if (want && *want && strcmp(want, "default")) {
+        AudioDeviceID chosen = mic_input_by_uid(want);
+        if (chosen != kAudioObjectUnknown) { mic_device_name(chosen, dev, n); *uid = mic_string(chosen, kAudioDevicePropertyDeviceUID); return MIC_TAKE_DEFAULT; }
+        LOG("microphone: DM_MIC_DEVICE=%s is not an input device connected now: choosing as without it", want);
+    }
     AudioDeviceID in_id = mic_default_device(kAudioHardwarePropertyDefaultInputDevice), out_id = mic_default_device(kAudioHardwarePropertyDefaultOutputDevice);
     CFStringRef in_uid = mic_string(in_id, kAudioDevicePropertyDeviceUID), out_uid = mic_string(out_id, kAudioDevicePropertyDeviceUID);
     char in_u[256], out_u[256]; mic_cstr(in_uid, in_u, sizeof in_u, ""); mic_cstr(out_uid, out_u, sizeof out_u, "");

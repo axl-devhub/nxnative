@@ -5,6 +5,7 @@
 // app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import CoreAudio
 import QuartzCore
 import SwiftUI
 
@@ -178,6 +179,37 @@ enum LauncherWindowLayout {
     }
 }
 
+/// The Mac's audio input devices as choice options, [UID, name], for a setting with open "audio-input" (DM_MIC_DEVICE, which hle_audio.c matches by UID)
+func audioInputOptions() -> [[String]] {
+    func text(_ dev: AudioDeviceID, _ sel: AudioObjectPropertySelector) -> String? {
+        var a = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var v: Unmanaged<CFString>?; var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &v) == noErr, let s = v else { return nil }
+        return s.takeRetainedValue() as String
+    }
+    var a = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size) == noErr else { return [] }
+    var devs = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &devs) == noErr else { return [] }
+    var streams = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+    return devs.compactMap { dev in
+        var n: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(dev, &streams, 0, nil, &n) == noErr, n > 0, let uid = text(dev, kAudioDevicePropertyDeviceUID), !uid.isEmpty else { return nil }
+        return [uid, text(dev, kAudioObjectPropertyName) ?? uid]
+    }
+}
+/// The list with each open choice's run-time options added after its own. A saved device that is not connected stays in the list, so the choice is kept until it returns
+func withRunTimeOptions(_ settings: [Setting], saved: (String) -> String?, inputs: [[String]]) -> [Setting] {
+    settings.map { s in
+        guard s.open == "audio-input" else { return s }
+        var t = s, opts = (s.options ?? []) + inputs.filter { d in !(s.options ?? []).contains { $0[0] == d[0] } }
+        if let v = saved(s.env), !v.isEmpty, !opts.contains(where: { $0[0] == v }) { opts.append([v, "Not connected"]) }
+        t.options = opts
+        return t
+    }
+}
+
 // 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
 @_cdecl("dm_mac_launcher")
 public func dmMacLauncher() -> Int32 {
@@ -187,7 +219,7 @@ public func dmMacLauncher() -> Int32 {
         fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
         return 2
     }
-    let model = LauncherModel(file.settings)
+    let model = LauncherModel(withRunTimeOptions(file.settings, saved: { UserDefaults.standard.object(forKey: "launcher." + $0) as? String }, inputs: audioInputOptions()))
     let app = NSApplication.shared, launcher = Launcher(model)
     app.setActivationPolicy(.regular)
     app.delegate = launcher
